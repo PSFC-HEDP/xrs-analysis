@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import os.path
-from math import cos, sin
+from math import cos, sin, nan
 
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import LinearLocator
 from numpy.typing import NDArray
 from scipy import interpolate, optimize
 
@@ -56,19 +57,16 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 	    :return: the PSL data resloved in space and energy
 	"""
 	# load in the image
-	pixel_size = scan.attrs["pixelSizeX"]
+	pixel_size = scan.attrs["pixelSizeX"]/1e4
 	assert scan.attrs["pixelSizeX"] == scan.attrs["pixelSizeY"], "why aren’t the pixels square?"
 	raw_image = np.transpose(scan[:, :])  # convert from (y,x) indexing to (i,j) indexing
 
-	# perform crude background subtraction
-	subtracted_image = np.maximum(0, raw_image - np.quantile(raw_image[raw_image > 0], .5))
-
 	# convert it to an interpolator
-	x = pixel_size*np.arange(-subtracted_image.shape[0]/2 + 1/2, subtracted_image.shape[0]/2)
-	y = pixel_size*np.arange(-subtracted_image.shape[1]/2 + 1/2, subtracted_image.shape[1]/2)
-	X, Y = np.meshgrid(x, y, indexing="ij", sparse=True)
+	x = pixel_size*np.arange(-raw_image.shape[0]/2 + 1/2, raw_image.shape[0]/2)
+	y = pixel_size*np.arange(-raw_image.shape[1]/2 + 1/2, raw_image.shape[1]/2)
+	X, Y = np.meshgrid(x, y, indexing="ij")
 	image_interpolator = interpolate.RegularGridInterpolator(
-		(x, y), subtracted_image, bounds_error=False, fill_value=0)
+		(x, y), raw_image, bounds_error=False, fill_value=0)
 
 	# rotate the image to maximize the maximum of the spectrally integrated image
 	def negative_spacial_peak_given_angle(angle: float) -> float:
@@ -82,31 +80,80 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 	rotated_y = -X*sin(angle) + Y*cos(angle)
 	rotated_image = image_interpolator((rotated_x, rotated_y))
 
-	# crop it to the edges that look like the minimum and maximum energy bounds
-	integrated_spectrum = rotated_image.sum(axis=1)
+	# show the result of the rotation
+	extent = (x[0] - pixel_size/2, x[-1] + pixel_size/2,
+	          y[0] - pixel_size/2, y[-1] + pixel_size/2)
+	fig, (ax_upper, ax_lower) = plt.subplots(2, 1, sharex="col", figsize=(8, 3.5))
+	for ax, image, title in [(ax_upper, raw_image, "Raw image"),
+	                         (ax_lower, rotated_image, "Rotated image")]:
+		ax.set_title(title)
+		ax.imshow(image.T, extent=extent, origin="lower", aspect="equal", cmap=CMAP["psl"])
+		ax.yaxis.set_major_locator(LinearLocator(11))
+		ax.yaxis.set_ticklabels([])
+		ax.grid(color="w", linewidth=0.4, axis="y")
+
+	# identify a background region and perform ramped background subtraction
+	min_significant_psl = np.median(rotated_image)/100
+	on_image_plate = erode(rotated_image > min_significant_psl, 10)  # type: ignore
+	integrated_image = np.nanmean(np.where(on_image_plate, rotated_image, nan), axis=0)
+	signal_cutoff = .9*np.nanquantile(integrated_image, .1) + .1*np.nanmax(integrated_image)
+	out_of_signal_region = integrated_image < signal_cutoff
+	in_background_region = on_image_plate & out_of_signal_region
+	background_0, background_dx, background_dy = linear_regress_2d(
+		X[in_background_region], Y[in_background_region], rotated_image[in_background_region])
+	subtracted_image = rotated_image - (background_0 + X*background_dx + Y*background_dy)
+	subtracted_image[~on_image_plate] = 0  # don’t background-subtract the off-image-plate areas
+
+	# show the result of the background subtraction
+	fig, (ax_upper, ax_middle, ax_lower) = plt.subplots(3, 1, sharex="col", figsize=(8, 5))
+	for ax, image, title in [(ax_upper, np.where(in_background_region, rotated_image, nan), "Background region"),
+	                         (ax_middle, rotated_image, "Without background subtraction"),
+	                         (ax_lower, subtracted_image, "With background subtraction (red is negative)")]:
+		ax.set_title(title)
+		vmax = np.max(rotated_image, where=in_background_region, initial=0)
+		ax.imshow(image.T, extent=extent, origin="lower", aspect="equal",
+		          cmap=CMAP["psl"], vmin=0, vmax=vmax)
+		ax.imshow(np.where(image < 0, -image, nan).T, extent=extent, origin="lower", aspect="equal",
+		          cmap=CMAP["blood"], vmin=0, vmax=vmax/2)
+		if not np.any(np.isnan(image)):
+			ax.contour(x, y, in_background_region.T, levels=[1/2], colors=["w"], linewidths=[0.4])
+	plt.show()
+
+	# crop it to the minimum energy edge and maximum energy edge
+	integrated_spectrum = subtracted_image.sum(axis=1)
 	cutoff = np.quantile(integrated_spectrum, .7)/2
 	i_min = np.nonzero(integrated_spectrum > cutoff)[0][0]
 	i_max = np.nonzero(integrated_spectrum > cutoff)[0][-1]
 
-	for title, image, include_lines in [("raw", raw_image, False), ("corrected", rotated_image, True)]:
-		fig, ((ax_tl, ax_tr), (ax_bl, ax_br)) = plt.subplots(2, 2, sharex="col", sharey="row",
-		                                                     gridspec_kw=dict(wspace=0, hspace=0))
-		ax_tl.set_title(title)
-		ax_tl.plot(x, image.sum(axis=1))
-		ax_tl.grid()
-		ax_tl.set_ylim(0, None)
-		if include_lines:
-			ax_tl.axhline(cutoff, color="k", linestyle="dashed")
-			ax_tl.axvline(x[i_min] - pixel_size/2, color="k", linestyle="dashed")
-			ax_tl.axvline(x[i_max] + pixel_size/2, color="k", linestyle="dashed")
-		ax_br.plot(image.sum(axis=0), y)
-		ax_br.grid()
-		ax_br.set_xlim(0, None)
-		ax_bl.imshow(image.T, origin="lower", cmap=CMAP["psl"],
-		             extent=(x[0] - pixel_size/2, x[-1] + pixel_size/2,
-		                     y[0] - pixel_size/2, y[-1] + pixel_size/2))
-		ax_bl.set_xlabel("Spatial direction (μm)")
-		ax_bl.set_xlabel("Energy direction (μm)")
+	# crop it to the spacial data region
+	integrated_image = subtracted_image.sum(axis=0)
+	j_peak = np.argmax(integrated_image)
+	cutoff = 0.1*integrated_image[j_peak]
+	j_min = np.nonzero(integrated_image[:j_peak] < cutoff)[0][-1]
+	j_max = np.nonzero(integrated_image[j_peak:] < cutoff)[0][0] + j_peak
+	j_min, j_max = j_min - (j_max - j_min)//2, j_max + (j_max - j_min)//2  # abritrarily expand the bounds a bit
+	j_min = max(0, j_min)
+	j_max = min(j_max, integrated_image.size - 1)
+
+	# show the results of the cropping
+	fig, (ax_upper, ax_lower) = plt.subplots(2, 1, sharex="col", figsize=(8, 3.5),
+	                                         gridspec_kw=dict(hspace=0))
+	ax_upper.set_title("Data bounds")
+	ax_upper.plot(x, subtracted_image.sum(axis=1))
+	ax_upper.grid()
+	ax_upper.set_ylim(0, None)
+	ax_upper.axhline(cutoff, color="k", linestyle="dashed", linewidth=1.)
+	ax_upper.axvline(x[i_min] - pixel_size/2, color="k", linestyle="dashed", linewidth=1.)
+	ax_upper.axvline(x[i_max] + pixel_size/2, color="k", linestyle="dashed", linewidth=1.)
+	ax_upper.grid()
+	ax_lower.imshow(image.T, extent=extent, origin="lower", aspect="auto", cmap=CMAP["psl"], vmin=0)
+	ax_lower.axvline(x[i_min] - pixel_size/2, color="w", linestyle="dashed", linewidth=1.)
+	ax_lower.axvline(x[i_max] + pixel_size/2, color="w", linestyle="dashed", linewidth=1.)
+	ax_lower.axhline(y[j_min] - pixel_size/2, color="w", linestyle="dashed", linewidth=1.)
+	ax_lower.axhline(y[j_max] + pixel_size/2, color="w", linestyle="dashed", linewidth=1.)
+	ax_lower.set_ylabel("Spatial direction (cm)")
+	ax_lower.set_xlabel("Energy direction (cm)")
+
 	plt.show()
 
 	cropped_image = rotated_image[i_min:i_max + 1, :]
@@ -144,6 +191,30 @@ def plot_and_save_spectrum(spectrum: SpatialSpectrum) -> None:
 	plt.tight_layout()
 
 	plt.show()
+
+
+def linear_regress_2d(x: NDArray[float], y: NDArray[float], z: NDArray[float]) -> tuple[float, float, float]:
+	""" fit a plane to a cloud of points
+	    :param x: the x coordinates at which z is known
+	    :param y: the y coordinates at which z is known
+	    :param z: the actual, noisy height values at each point where there is data
+	    :return f, df/dx, and df/dy at (0, 0) such that z ≈ f + df/dx*x + df/dy*y
+	"""
+	A = np.array([[z.size,    np.sum(x),   np.sum(y)],
+	              [np.sum(x), np.sum(x*x), np.sum(y*x)],
+	              [np.sum(y), np.sum(x*y), np.sum(y*y)]])
+	b = np.array([np.sum(z), np.sum(x*z), np.sum(y*z)])
+	f, dfdx, dfdy = np.linalg.solve(A, b)
+	return f, dfdx, dfdy
+
+
+def erode(array: NDArray[bool], distance: int) -> NDArray[bool]:
+	for i in range(distance):
+		array[1:, :] &= array[0:-1, :]
+		array[:, 1:] &= array[:, 0:-1]
+		array[0:-1, :] &= array[1:, :]
+		array[:, 0:-1] &= array[:, 1:]
+	return array
 
 
 def main():
