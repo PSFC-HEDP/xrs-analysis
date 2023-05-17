@@ -119,27 +119,27 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 			ax.contour(x, y, in_background_region.T, levels=[1/2], colors=["w"], linewidths=[0.4])
 	plt.show()
 
-	# crop it to the minimum energy edge and maximum energy edge
-	integrated_spectrum = subtracted_image.sum(axis=1)
-	cutoff = np.quantile(integrated_spectrum, .7)/2
-	i_min = np.nonzero(integrated_spectrum > cutoff)[0][0]
-	i_max = np.nonzero(integrated_spectrum > cutoff)[0][-1]
-
 	# crop it to the spacial data region
 	integrated_image = subtracted_image.sum(axis=0)
 	j_peak = np.argmax(integrated_image)
 	cutoff = 0.1*integrated_image[j_peak]
-	j_min = np.nonzero(integrated_image[:j_peak] < cutoff)[0][-1]
+	j_min = np.nonzero(integrated_image[:j_peak] < cutoff)[0][-1]  # these are inclusive
 	j_max = np.nonzero(integrated_image[j_peak:] < cutoff)[0][0] + j_peak
 	j_min, j_max = j_min - (j_max - j_min)//2, j_max + (j_max - j_min)//2  # abritrarily expand the bounds a bit
 	j_min = max(0, j_min)
 	j_max = min(j_max, integrated_image.size - 1)
 
+	# crop it to the minimum energy edge and maximum energy edge
+	integrated_spectrum = subtracted_image[:, j_min:j_max + 1].sum(axis=1)
+	cutoff = np.quantile(integrated_spectrum, .7)/3
+	i_min = np.nonzero(integrated_spectrum > cutoff)[0][0]  # these are inclusive
+	i_max = np.nonzero(integrated_spectrum > cutoff)[0][-1]
+
 	# show the results of the cropping
 	fig, (ax_upper, ax_lower) = plt.subplots(2, 1, sharex="col", figsize=(8, 3.5),
 	                                         gridspec_kw=dict(hspace=0))
 	ax_upper.set_title("Data bounds")
-	ax_upper.plot(x, subtracted_image.sum(axis=1))
+	ax_upper.plot(x, subtracted_image[:, j_min:j_max + 1].sum(axis=1))
 	ax_upper.grid()
 	ax_upper.set_ylim(0, None)
 	ax_upper.axhline(cutoff, color="k", linestyle="dashed", linewidth=1.)
@@ -156,7 +156,7 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 
 	plt.show()
 
-	cropped_image = rotated_image[i_min:i_max + 1, :]
+	cropped_image = subtracted_image[i_min:i_max + 1, :]
 	return SpatialSpectrum(cropped_image, energy_min, energy_max, pixel_size)
 
 
@@ -176,17 +176,20 @@ def plot_and_save_spectrum(spectrum: SpatialSpectrum) -> None:
 	"""
 	x = spectrum.pixel_size*np.arange(0.5, spectrum.num_x)
 	energy = np.linspace(spectrum.energy_min, spectrum.energy_max, spectrum.num_energies)
-	centroid = np.average(x, weights=np.sum(spectrum.values, axis=1))
+	centroid = np.average(x, weights=np.sum(spectrum.values, axis=0))
+	x = (x - centroid)*1e4
 
-	plt.figure()
-	plt.plot(x - centroid, np.sum(spectrum.values, axis=1))
+	plt.figure(figsize=(8, 4))
+	plt.plot(x, np.sum(spectrum.values, axis=0))
 	plt.xlabel("Position (μm)")
+	plt.xlim(x[0], x[-1])
 	plt.grid()
 	plt.tight_layout()
 
-	plt.figure()
-	plt.plot(energy, np.sum(spectrum.values, axis=0)*spectrum.pixel_size)
+	plt.figure(figsize=(8, 4))
+	plt.plot(energy, np.sum(spectrum.values, axis=1)*spectrum.pixel_size)
 	plt.xlabel("Photon energy (keV)")
+	plt.xlim(energy[0], energy[-1])
 	plt.grid()
 	plt.tight_layout()
 
