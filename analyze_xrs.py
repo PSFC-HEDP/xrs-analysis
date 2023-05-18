@@ -99,9 +99,9 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 	signal_cutoff = .9*np.nanquantile(integrated_image, .1) + .1*np.nanmax(integrated_image)
 	out_of_signal_region = integrated_image < signal_cutoff
 	in_background_region = on_image_plate & out_of_signal_region
-	background_0, background_dx, background_dy = linear_regress_2d(
+	coefs = fit_2d_polynomial(
 		X[in_background_region], Y[in_background_region], rotated_image[in_background_region])
-	subtracted_image = rotated_image - (background_0 + X*background_dx + Y*background_dy)
+	subtracted_image = rotated_image - (coefs[0]*X**2 + coefs[1]*X + coefs[2]*Y + coefs[3])
 	subtracted_image[~on_image_plate] = 0  # don’t background-subtract the off-image-plate areas
 
 	# show the result of the background subtraction
@@ -131,7 +131,7 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 
 	# crop it to the minimum energy edge and maximum energy edge
 	integrated_spectrum = subtracted_image[:, j_min:j_max + 1].sum(axis=1)
-	cutoff = np.quantile(integrated_spectrum, .7)/3
+	cutoff = np.quantile(integrated_spectrum, .7)/6
 	i_min = np.nonzero(integrated_spectrum > cutoff)[0][0]  # these are inclusive
 	i_max = np.nonzero(integrated_spectrum > cutoff)[0][-1]
 
@@ -196,19 +196,20 @@ def plot_and_save_spectrum(spectrum: SpatialSpectrum) -> None:
 	plt.show()
 
 
-def linear_regress_2d(x: NDArray[float], y: NDArray[float], z: NDArray[float]) -> tuple[float, float, float]:
-	""" fit a plane to a cloud of points
+def fit_2d_polynomial(x: NDArray[float], y: NDArray[float], z: NDArray[float]) -> tuple[float, float, float, float]:
+	""" fit an extruded parabola to a cloud of points
 	    :param x: the x coordinates at which z is known
 	    :param y: the y coordinates at which z is known
 	    :param z: the actual, noisy height values at each point where there is data
-	    :return f, df/dx, and df/dy at (0, 0) such that z ≈ f + df/dx*x + df/dy*y
+	    :return a, b, c, and d such that z ≈ a*x^2 + b*x + c*y + d
 	"""
-	A = np.array([[z.size,    np.sum(x),   np.sum(y)],
-	              [np.sum(x), np.sum(x*x), np.sum(y*x)],
-	              [np.sum(y), np.sum(x*y), np.sum(y*y)]])
-	b = np.array([np.sum(z), np.sum(x*z), np.sum(y*z)])
-	f, dfdx, dfdy = np.linalg.solve(A, b)
-	return f, dfdx, dfdy
+	matrix = np.array([[np.sum(x**4),   np.sum(x**3), np.sum(y*x**2), np.sum(x**2)],
+	                   [np.sum(x**3),   np.sum(x**2), np.sum(y*x),    np.sum(x)   ],
+	                   [np.sum(x**2*y), np.sum(x*y),  np.sum(y**2),   np.sum(y)   ],
+	                   [np.sum(x**2),   np.sum(x),    np.sum(y),      z.size      ]])
+	vector = np.array([np.sum(x**2*z), np.sum(x*z), np.sum(y*z), np.sum(z)])
+	a, b, c, d = np.linalg.solve(matrix, vector)
+	return a, b, c, d
 
 
 def erode(array: NDArray[bool], distance: int) -> NDArray[bool]:
