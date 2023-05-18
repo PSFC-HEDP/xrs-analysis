@@ -2,34 +2,41 @@ from __future__ import annotations
 
 import argparse
 import os.path
+import re
+import sys
 from math import cos, sin, nan
 
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import LinearLocator
+from matplotlib.widgets import Slider
 from numpy.typing import NDArray
 from scipy import interpolate, optimize
 
 from cmap import CMAP
+from image_plate import Filter, xray_sensitivity
 
 PERIODIC_TABLE = {
-	2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O",
+	1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O",
 	10: "Ne", 13: "Al", 14: "Si", 18: "Ar", 36: "Kr", 54: "Xe",
 }
 
 
-def analyze_xrs(filename: str, energy_min: float, energy_max: float, atomic_numbers: set[int]):
+def analyze_xrs(filename: str, energy_min: float, energy_max: float,
+                filter_stack: list[Filter], detector_type: str, atomic_numbers: set[int]):
 	""" load an XRS image plate scan as a HDF5 file and, with the user’s help, extract and plot an x-ray spectrum
 	    :param filename: either the path to the file (absolute or relative), or a distinct substring of a filename in ./data/
-	    :param energy_min: the nominal minimum energy that XRS sees
-	    :param energy_max: the nominal maximum energy that XRS sees
+	    :param energy_min: the nominal minimum energy that XRS sees (keV)
+	    :param energy_max: the nominal maximum energy that XRS sees (keV)
+	    :param filter_stack: the list of layers of material between the source and the image plate
+	    :param detector_type: the type of FujiFilm BAS image plate (one of 'MS', 'SR', or 'TR')
 	    :param atomic_numbers: the set of elements whose lines we expect to see
 	"""
 	scan = find_scan_file(filename)
-	spectrum = rotate_image(scan, energy_min, energy_max)
-	spectrum = align_spectrum(spectrum, atomic_numbers)
-	plot_and_save_spectrum(spectrum)
+	distribution = rotate_image(scan, energy_min, energy_max)
+	distribution = align_data(distribution, filter_stack, detector_type, atomic_numbers)
+	plot_and_save_spectrum(distribution, filter_stack, detector_type)
 
 
 def find_scan_file(filename: str) -> h5py.Dataset:
@@ -48,12 +55,12 @@ def find_scan_file(filename: str) -> h5py.Dataset:
 	                        f"any .h5 files matching {filename!r} in data/")
 
 
-def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> SpatialSpectrum:
+def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> SpatialEnergyDistribution:
 	""" take a raw scan file, infer how much it has been rotated and shifted, and correct it to
 	    obtain an allined spacio-energo-image
 	    :param scan: the scan data taken directly from the h5py File
-	    :param energy_min: the nominal minimum energy that XRS sees
-	    :param energy_max: the nominal maximum energy that XRS sees
+	    :param energy_min: the nominal minimum energy that XRS sees (keV)
+	    :param energy_max: the nominal maximum energy that XRS sees (keV)
 	    :return: the PSL data resloved in space and energy
 	"""
 	# load in the image
@@ -130,10 +137,10 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 	j_max = min(j_max, integrated_image.size - 1)
 
 	# crop it to the minimum energy edge and maximum energy edge
-	integrated_spectrum = subtracted_image[:, j_min:j_max + 1].sum(axis=1)
-	cutoff = np.quantile(integrated_spectrum, .7)/6
-	i_min = np.nonzero(integrated_spectrum > cutoff)[0][0]  # these are inclusive
-	i_max = np.nonzero(integrated_spectrum > cutoff)[0][-1]
+	integrated_distribution = subtracted_image[:, j_min:j_max + 1].sum(axis=1)
+	cutoff = np.quantile(integrated_distribution, .7)/6
+	i_min = np.nonzero(integrated_distribution > cutoff)[0][0]  # these are inclusive
+	i_max = np.nonzero(integrated_distribution > cutoff)[0][-1]
 
 	# show the results of the cropping
 	fig, (ax_upper, ax_lower) = plt.subplots(2, 1, sharex="col", figsize=(8, 3.5),
@@ -156,40 +163,87 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 
 	plt.show()
 
-	cropped_image = subtracted_image[i_min:i_max + 1, :]
-	return SpatialSpectrum(cropped_image, energy_min, energy_max, pixel_size)
+	cropped_image = subtracted_image[i_min:i_max + 1, j_min:j_max + 1]
+	return SpatialEnergyDistribution(cropped_image, energy_min, energy_max, pixel_size)
 
 
-def align_spectrum(spectrum: SpatialSpectrum, atomic_numbers: set[int]) -> SpatialSpectrum:
+def align_data(distribution: SpatialEnergyDistribution, filter_stack: list[Filter], detector_type: str, atomic_numbers: set[int]) -> SpatialEnergyDistribution:
 	""" get the user to help shift and scale the spectrum to make the observed features line up
 	    with expected atomic line emission
-	    :param spectrum: the PSL resolved in space and energy, which might be a bit misallined
+	    :param distribution: the PSL resolved in space and energy, which might be a bit misallined
+	    :param filter_stack: the list of layers of material between the source and the image plate
+	    :param detector_type: the type of FujiFilm BAS image plate (one of 'MS', 'SR', or 'TR')
 	    :param atomic_numbers: the set of elements whose lines we expect to see
-	    :return: the spectrum resolved in space and energy, now correctly allined
+	    :return: the PSL resolved in space and energy, now correctly allined
 	"""
-	return spectrum
+	integrated_psl = distribution.values.sum(axis=1)
+	# set up the figure
+	fig, ax = plt.subplots(figsize=(8, 4.5))
+	curve, = ax.plot([], [])
+	ax.grid()
+	ax.set_xlabel("Energy (keV)")
+	ax.set_title("Adjust to match the lines, then close the window.")
+	ax.set_xlim(distribution.energy_min, distribution.energy_max)
+
+	# add sliders
+	fig.subplots_adjust(.08, .30, .97, .93)
+	ax_shift = fig.add_axes([.08, .12, .89, .04])
+	ax_scale = fig.add_axes([.08, .04, .89, .04])
+	shift_slider = Slider(ax=ax_shift, label="Shift", valmin=-.5, valmax=+.5, valinit=0)
+	scale_slider = Slider(ax=ax_scale, label="Scale", valmin=0.9, valmax=1.1, valinit=1)
+
+	# define how to respond to the sliders
+	def get_energy_bounds_from_sliders() -> tuple[float, float]:
+		energy_center = (distribution.energy_min + distribution.energy_max)/2 + shift_slider.val
+		energy_range = (distribution.energy_max - distribution.energy_min)*scale_slider.val
+		energy_min = energy_center - energy_range/2
+		energy_max = energy_center + energy_range/2
+		return energy_min, energy_max
+
+	def update_plot(*_):
+		energies = np.linspace(*get_energy_bounds_from_sliders(), distribution.num_energies)
+		curve.set_xdata(energies)
+		curve.set_ydata(integrated_psl/xray_sensitivity(energies, filter_stack, detector_type))
+		ax.set_ylim(0, 1.1*np.max(curve.get_ydata()))
+		fig.canvas.draw_idle()
+
+	scale_slider.on_changed(update_plot)
+	shift_slider.on_changed(update_plot)
+
+	# wait for the user to finish
+	update_plot()
+	plt.show()
+
+	# update the PSL distribution according to the new energy bounds
+	energy_min, energy_max = get_energy_bounds_from_sliders()
+	return SpatialEnergyDistribution(distribution.values, energy_min, energy_max, distribution.pixel_size)
 
 
-def plot_and_save_spectrum(spectrum: SpatialSpectrum) -> None:
+def plot_and_save_spectrum(distribution: SpatialEnergyDistribution, filter_stack: list[Filter], detector_type: str) -> None:
 	""" display the results of the analysis
-	    :param spectrum: the spectrum resolved in space and energy
+	    :param distribution: the PSL resolved in space and energy
+	    :param filter_stack: the list of layers of material between the source and the image plate
+	    :param detector_type: the type of FujiFilm BAS image plate (one of 'MS', 'SR', or 'TR')
 	"""
-	x = spectrum.pixel_size*np.arange(0.5, spectrum.num_x)
-	energy = np.linspace(spectrum.energy_min, spectrum.energy_max, spectrum.num_energies)
-	centroid = np.average(x, weights=np.sum(spectrum.values, axis=0))
+	x = distribution.pixel_size*np.arange(0.5, distribution.num_x)
+	energy = np.linspace(distribution.energy_min, distribution.energy_max, distribution.num_energies)
+	spectrum = distribution.values/xray_sensitivity(energy, filter_stack, detector_type)[:, np.newaxis]
+	centroid = np.average(x, weights=np.sum(spectrum, axis=0))
 	x = (x - centroid)*1e4
 
 	plt.figure(figsize=(8, 4))
-	plt.plot(x, np.sum(spectrum.values, axis=0))
+	plt.plot(x, np.sum(spectrum, axis=0))
 	plt.xlabel("Position (μm)")
 	plt.xlim(x[0], x[-1])
+	plt.ylim(0, None)
 	plt.grid()
 	plt.tight_layout()
 
 	plt.figure(figsize=(8, 4))
-	plt.plot(energy, np.sum(spectrum.values, axis=1)*spectrum.pixel_size)
+	plt.plot(energy, np.sum(spectrum, axis=1)*distribution.pixel_size)
 	plt.xlabel("Photon energy (keV)")
 	plt.xlim(energy[0], energy[-1])
+	plt.ylim(0, None)
 	plt.grid()
 	plt.tight_layout()
 
@@ -229,23 +283,39 @@ def main():
 	parser.add_argument("filename", type=str,
 	                    help="either the path to the file (absolute or relative), or a distinct substring of a filename in ./data")
 	parser.add_argument("minimum_energy", type=float,
-	                    help="the nominal minimum energy that XRS sees")
+	                    help="the nominal minimum energy that XRS sees (keV)")
 	parser.add_argument("maximum_energy", type=float,
-	                    help="the nominal maximum energy that XRS sees")
+	                    help="the nominal maximum energy that XRS sees (keV)")
+	parser.add_argument("blast_shield_thickness", type=float,
+	                    help="the thickness of the Be blast shield (mils)")
+	parser.add_argument("--filter_material", type=str, required=False, default="Ta",
+	                    help="the additional filtering material (e.g. 'Al' or 'Ta')")
+	parser.add_argument("--filter_thickness", type=float, required=False, default=0.,
+	                    help="the thickness of the additional filtering (mils)")
+	parser.add_argument("--detector_type", type=str, required=False, default="BAS_MS",
+	                    help="the type of FujiFilm BAS image plate (one of 'BAS_MS', 'BAS_SR', or 'BAS_TR')")
 	for atomic_number, atomic_symbol in PERIODIC_TABLE.items():
 		parser.add_argument(f"--{atomic_symbol}", action="store_true",
 		                    help=f"whether to expect {atomic_symbol} lines")
 	args = vars(parser.parse_args())
-	atomic_numbers = {1}
+	atomic_numbers = set()
 	for atomic_number, atomic_symbol in PERIODIC_TABLE.items():
 		if args[atomic_symbol]:
 			atomic_numbers.add(atomic_number)
-	analyze_xrs(args["filename"], args["minimum_energy"], args["maximum_energy"], atomic_numbers)
+	filter_stack = [(args["blast_shield_thickness"]*25.4, "Be"),
+	                (args["filter_thickness"]*25.4, args["filter_material"])]
+	detector_type_parsing = re.fullmatch(
+		r"(BAS[-_ ]?)?(MS|SR|TR)([-_ ]?(IP|image ?plate))?", args["detector_type"], re.IGNORECASE)
+	if detector_type_parsing is None:
+		print("The detector type must be one of MS, SR, or TR.", file=sys.stderr)
+	else:
+		analyze_xrs(args["filename"], args["minimum_energy"], args["maximum_energy"],
+		            filter_stack, detector_type_parsing.group(2), atomic_numbers)
 
 
-class SpatialSpectrum:
+class SpatialEnergyDistribution:
 	def __init__(self, values: NDArray[float], energy_min: float, energy_max: float, pixel_size: float):
-		""" a spacially- and temporally-resolved x-ray spectrum, including the axis information needed to interpret it.
+		""" a function of position (in 1D) and energy, bundled with the axis information needed to interpret it.
 		    :param values: the spectral data, indexed along energy on axis 0 and space on axis 1
 		    :param energy_min: the photon energy (keV) corresponding to the leftmost value
 		    :param energy_max: the photon energy (keV) corresponding to the rightmost value
