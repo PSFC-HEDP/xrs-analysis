@@ -53,17 +53,33 @@ def log_xray_sensitivity(
 	    :param ip_type: the type of FujiFilm BAS image plate (one of "MS", "SR", or "TR")
 	    :param work_function: the x-ray energy deposition needed to generate a PSL of 1 (keV)
 	    :param psl_attenuation: the attenuation constant of the image plate's characteristic photostimulated luminescence
-	    :return: the log of the ratio of observed PSL to incident energy (?/keV)
+	    :return: the log of the ratio of observed PSL to incident energy (log(?/keV))
 	"""
 	phosphor, coating_thickness, phosphor_thickness = IMAGE_PLATE_SPECIFICATIONS[ip_type]
 	filter_stack = filter_stack + [(coating_thickness, "PET")]
-	attenuation = load_attenuation_curve(energy, phosphor)
-	self_transparency = 1/(1 + psl_attenuation/attenuation)
+	xray_attenuation = load_attenuation_curve(energy, phosphor)
+	compound_attenuation = xray_attenuation + psl_attenuation
 	log_sensitivity = np.log(
-		1/work_function*self_transparency*(1 - np.exp(-attenuation*phosphor_thickness/self_transparency)))
+		1/work_function*xray_attenuation/compound_attenuation *
+		(1 - np.exp(-compound_attenuation*phosphor_thickness))
+	)
 	for thickness, material in filter_stack:
 		log_sensitivity += log_xray_transmission(energy, thickness, material)
 	return log_sensitivity
+
+
+def xray_transmission(
+		energy: NDArray[float], thickness: float, material: str) -> NDArray[float]:
+	""" calculate the fraction of photons at some energy that get thru some material
+	    :param energy: the photon energies (keV)
+	    :param thickness: the thickness of the material (μm)
+	    :param material: the name of the material. accepted materials include "Al", "Ta", "kapton", "MSIP", and
+	                     "SRIP". "MSIP" and "SRIP" represent BAS-MS and BAS-SR image plates; whenever a layer has
+	                     one of those as the material name, it will read directly from the relevant attenuation
+	                     file *without* multiplying by the thickness (the thickness is ignored).
+	    :return: the fraction of photons that make it through the filter
+	"""
+	return np.exp(log_xray_transmission(energy, thickness, material))
 
 
 def log_xray_transmission(
