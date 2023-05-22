@@ -33,24 +33,25 @@ def analyze_xrs(filename: str, energy_min: float, energy_max: float,
 	    :param detector_type: the type of FujiFilm BAS image plate (one of 'MS', 'SR', or 'TR')
 	    :param atomic_numbers: the set of elements whose lines we expect to see
 	"""
-	scan = find_scan_file(filename)
+	filename = find_scan_file(filename)
+	scan = h5py.File(filename)["PSL_per_px"]
 	distribution = rotate_image(scan, energy_min, energy_max)
 	distribution = align_data(distribution, filter_stack, detector_type, atomic_numbers)
-	plot_and_save_spectrum(distribution, filter_stack, detector_type)
+	plot_and_save_spectrum(distribution, filename, filter_stack, detector_type)
 
 
-def find_scan_file(filename: str) -> h5py.Dataset:
+def find_scan_file(filename: str) -> str:
 	""" open the file if the filename is a complete path. otherwise, search for a file containing the given string in data/
 	    :param filename: either the path to the file (absolute or relative), or a distinct substring of a filename in ./data/
 	    :return: the opened h5py File object
 	    :raise FileNotFoundError: if neither of the attempted methods produced a readable HDF5 file
 	"""
 	if os.path.isfile(filename):
-		return h5py.File(filename)["PSL_per_px"]
+		return filename
 	else:
 		for found_filename in os.listdir("data/"):
 			if found_filename.endswith(".h5") and filename in found_filename:
-				return h5py.File(f"data/{found_filename}")["PSL_per_px"]
+				return f"data/{found_filename}"
 	raise FileNotFoundError(f"I could not find the file {filename!r}, nor could I find "
 	                        f"any .h5 files matching {filename!r} in data/")
 
@@ -179,11 +180,20 @@ def align_data(distribution: SpatialEnergyDistribution, filter_stack: list[Filte
 	integrated_psl = distribution.values.sum(axis=1)
 	# set up the figure
 	fig, ax = plt.subplots(figsize=(8, 4.5))
-	curve, = ax.plot([], [])
+	curve, = ax.plot([], [], color="k")
 	ax.grid()
 	ax.set_xlabel("Energy (keV)")
 	ax.set_title("Adjust to match the lines, then close the window.")
 	ax.set_xlim(distribution.energy_min, distribution.energy_max)
+
+	# # include the places where we expect atomic lines
+	# for color_index, z in enumerate(atomic_numbers):
+	# 	for n1 in range(2, 6):
+	# 		for n2 in range(1, n1):
+	# 			hv = .0136*(z - 1)**2 * (1/n2**2 - 1/n1**2)
+	# 			# if .8 < hv < 24:
+	# 			print(f"does {PERIODIC_TABLE[z]} have a line at {hv*1000} eV?")  # http://hyperphysics.phy-astr.gsu.edu/hbase/Tables/kxray.html or https://xdb.lbl.gov/Section1/Table_1-2.pdf
+	# 			ax.axhline(hv, color=f"C{color_index}", linewidth=1.0, linestyle="dashed")
 
 	# add sliders
 	fig.subplots_adjust(.08, .30, .97, .93)
@@ -219,33 +229,50 @@ def align_data(distribution: SpatialEnergyDistribution, filter_stack: list[Filte
 	return SpatialEnergyDistribution(distribution.values, energy_min, energy_max, distribution.pixel_size)
 
 
-def plot_and_save_spectrum(distribution: SpatialEnergyDistribution, filter_stack: list[Filter], detector_type: str) -> None:
+def plot_and_save_spectrum(distribution: SpatialEnergyDistribution, filename: str, filter_stack: list[Filter], detector_type: str) -> None:
 	""" display the results of the analysis
 	    :param distribution: the PSL resolved in space and energy
+	    :param filename: the filename of the scan file, which will be used to create the output filename
 	    :param filter_stack: the list of layers of material between the source and the image plate
 	    :param detector_type: the type of FujiFilm BAS image plate (one of 'MS', 'SR', or 'TR')
 	"""
+	filename, _ = os.path.splitext(filename.replace("-[phosphor]", ""))
+
 	x = distribution.pixel_size*np.arange(0.5, distribution.num_x)
 	energy = np.linspace(distribution.energy_min, distribution.energy_max, distribution.num_energies)
 	spectrum = distribution.values/xray_sensitivity(energy, filter_stack, detector_type)[:, np.newaxis]
 	centroid = np.average(x, weights=np.sum(spectrum, axis=0))
 	x = (x - centroid)*1e4
 
-	plt.figure(figsize=(8, 4))
+	with h5py.File(f"{filename}-analyzed.h5", "w") as f:
+		f["photon energy"] = energy
+		f["photon energy"].attrs["units"] = "keV"
+		f["photon energy"].make_scale()
+		f["position"] = x
+		f["position"].attrs["units"] = "μm"
+		f["position"].make_scale()
+		f["energy density"] = spectrum
+		f["energy density"].attrs["units"] = "unclear"
+		f["energy density"].dims[0].attach_scale(f["photon energy"])
+		f["energy density"].dims[1].attach_scale(f["position"])
+
+	plt.figure(figsize=(8, 4), facecolor="none")
 	plt.plot(x, np.sum(spectrum, axis=0))
 	plt.xlabel("Position (μm)")
 	plt.xlim(x[0], x[-1])
 	plt.ylim(0, None)
 	plt.grid()
 	plt.tight_layout()
+	plt.savefig(f"{filename}-image.png", dpi=300)
 
-	plt.figure(figsize=(8, 4))
+	plt.figure(figsize=(8, 4), facecolor="none")
 	plt.plot(energy, np.sum(spectrum, axis=1)*distribution.pixel_size)
 	plt.xlabel("Photon energy (keV)")
 	plt.xlim(energy[0], energy[-1])
 	plt.ylim(0, None)
 	plt.grid()
 	plt.tight_layout()
+	plt.savefig(f"{filename}-spectrum.png", dpi=300)
 
 	plt.show()
 
@@ -281,7 +308,7 @@ def main():
 		description="Load an XRS image plate scan as a HDF5 file and, with the user’s help, extract "
 		            "and plot an x-ray spectrum.")
 	parser.add_argument("filename", type=str,
-	                    help="either the path to the file (absolute or relative), or a distinct substring of a filename in ./data")
+	                    help="comma-separated list of either filepaths (absolute or relative) or distinct filename substrings (if the files are in ./data)")
 	parser.add_argument("minimum_energy", type=float,
 	                    help="the nominal minimum energy that XRS sees (keV)")
 	parser.add_argument("maximum_energy", type=float,
@@ -309,8 +336,11 @@ def main():
 	if detector_type_parsing is None:
 		print("The detector type must be one of MS, SR, or TR.", file=sys.stderr)
 	else:
-		analyze_xrs(args["filename"], args["minimum_energy"], args["maximum_energy"],
-		            filter_stack, detector_type_parsing.group(2), atomic_numbers)
+		for filename in args["filename"].split(","):
+			print(f"Analyzing {filename}...")
+			analyze_xrs(filename, args["minimum_energy"], args["maximum_energy"],
+			            filter_stack, detector_type_parsing.group(2), atomic_numbers)
+		print("Done!")
 
 
 class SpatialEnergyDistribution:
