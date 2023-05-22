@@ -22,9 +22,15 @@ The arguments are as follows:
    These elements’ emission lines will appear on the screen where you adjust the spectral axis.
    For example, if you intend to align your spectrum to K-alpha emission from silicon and argon, you should add `--Si --Ar`.
 
+For example, a typical call might look something like
+~~~bash
+python analyze_xrs.py s104782,s104783 1809.0 3531.3 4 --Si --Ar
+~~~
+
 The script will automatically rectify the image if it’s rotated and subtract out any background.
 You will be prompted to identify the bounds of the data in space and energy.
 Don’t worry about being precise with those, tho, as it will adjust the bounds itself later.
+
 The most important part is the afformentioned alignment to elemental emission lines.
 Skipping this and trusting XRS to view the energy range you asked for will typically produce an error of about 100–200 eV,<sup>1</sup>
 which may be acceptable depending on your use-case.
