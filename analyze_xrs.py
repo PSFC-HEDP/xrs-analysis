@@ -20,21 +20,26 @@ from image_plate import Filter, xray_sensitivity
 
 plt.rcParams.update({"font.size": 14})
 
-PERIODIC_TABLE = {
-	1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O",
-	10: "Ne", 13: "Al", 14: "Si", 18: "Ar", 36: "Kr", 54: "Xe",
-}
+SPECTRAL_LINES = {
+	"Ne": [.84861],
+	"Al": [1.486295, 1.486708, 1.55745],
+	"Si": [1.739394, 1.739985, 1.83594],
+	"Ar": [2.955566, 2.957682, 3.1905],
+	"Kr": [12.595424, 12.648002, 14.112, 1.5860, 1.6366],
+	"Zr": [15.6909, 15.7751, 17.6678, 2.0399, 2.04236, 2.2194, 2.1244, 2.3027],
+	"Xe": [4.1099],
+}  # source: https://xdb.lbl.gov/Section1/Table_1-2.pdf
 
 
 def analyze_xrs(filename: str, energy_min: float, energy_max: float,
-                filter_stack: list[Filter], detector_type: str, atomic_numbers: set[int]):
+                filter_stack: list[Filter], detector_type: str, elements: set[str]):
 	""" load an XRS image plate scan as a HDF5 file and, with the user’s help, extract and plot an x-ray spectrum
 	    :param filename: either the path to the file (absolute or relative), or a distinct substring of a filename in ./data/
 	    :param energy_min: the nominal minimum energy that XRS sees (keV)
 	    :param energy_max: the nominal maximum energy that XRS sees (keV)
 	    :param filter_stack: the list of layers of material between the source and the image plate
 	    :param detector_type: the type of FujiFilm BAS image plate (one of 'MS', 'SR', or 'TR')
-	    :param atomic_numbers: the set of elements whose lines we expect to see
+	    :param elements: the symbols of the elements whose lines we expect to see
 	"""
 	filename = find_scan_file(filename)
 	try:
@@ -43,7 +48,7 @@ def analyze_xrs(filename: str, energy_min: float, energy_max: float,
 		print(f"{filename!r} does not appear to be an image plate scan.")
 	else:
 		distribution = rotate_image(scan, energy_min, energy_max)
-		distribution = align_data(distribution, filter_stack, detector_type, atomic_numbers)
+		distribution = align_data(distribution, filter_stack, detector_type, elements)
 		plot_and_save_spectrum(distribution, filename, filter_stack, detector_type)
 
 
@@ -240,7 +245,7 @@ def ask_user_for_bounds(x: NDArray[float], y: NDArray[float]) -> tuple[float, fl
 	fig.canvas.mpl_connect('button_press_event', on_click)
 
 	while plt.fignum_exists("selection"):
-		plt.pause(1)
+		plt.pause(0.1)
 	if len(selected_points) != 2:
 		raise ValueError("you didn't specify both limits.")
 
@@ -248,39 +253,41 @@ def ask_user_for_bounds(x: NDArray[float], y: NDArray[float]) -> tuple[float, fl
 	return min(selected_points), max(selected_points)
 
 
-def align_data(distribution: SpatialEnergyDistribution, filter_stack: list[Filter], detector_type: str, atomic_numbers: set[int]) -> SpatialEnergyDistribution:
+def align_data(distribution: SpatialEnergyDistribution, filter_stack: list[Filter], detector_type: str,
+               elements: set[str]) -> SpatialEnergyDistribution:
 	""" get the user to help shift and scale the spectrum to make the observed features line up
 	    with expected atomic line emission
 	    :param distribution: the PSL resolved in space and energy, which might be a bit misallined
 	    :param filter_stack: the list of layers of material between the source and the image plate
 	    :param detector_type: the type of FujiFilm BAS image plate (one of 'MS', 'SR', or 'TR')
-	    :param atomic_numbers: the set of elements whose lines we expect to see
+	    :param elements: the symbols of the elements whose lines we expect to see
 	    :return: the PSL resolved in space and energy, now correctly allined
 	"""
 	integrated_psl = distribution.values.sum(axis=1)
+
 	# set up the figure
 	fig, ax = plt.subplots(figsize=(8, 4.5))
 	curve, = ax.plot([], [], color="k")
 	ax.grid()
+	ax.locator_params(steps=[1, 2, 5, 10])
 	ax.set_xlabel("Energy (keV)")
 	ax.set_title("Adjust to match the lines, then close the window.")
 	ax.set_xlim(distribution.energy_min, distribution.energy_max)
+	ax.axvline(distribution.energy_min, color="k", linewidth=1.0, linestyle="dashed")
+	ax.axvline(distribution.energy_max, color="k", linewidth=1.0, linestyle="dashed")
 
-	# # include the places where we expect atomic lines
-	# for color_index, z in enumerate(atomic_numbers):
-	# 	for n1 in range(2, 6):
-	# 		for n2 in range(1, n1):
-	# 			hv = .0136*(z - 1)**2 * (1/n2**2 - 1/n1**2)
-	# 			# if .8 < hv < 24:
-	# 			print(f"does {PERIODIC_TABLE[z]} have a line at {hv*1000} eV?")  # http://hyperphysics.phy-astr.gsu.edu/hbase/Tables/kxray.html or https://xdb.lbl.gov/Section1/Table_1-2.pdf
-	# 			ax.axhline(hv, color=f"C{color_index}", linewidth=1.0, linestyle="dashed")
+	# include the places where we expect atomic lines
+	for color_index, symbol in enumerate(elements):
+		for hν in SPECTRAL_LINES[symbol]:
+			ax.axvline(hν, color=f"C{color_index}", linewidth=1.0, linestyle="dashed")
+		ax.text(SPECTRAL_LINES[symbol][0], 0, symbol, color=f"C{color_index}", horizontalalignment="right")
 
 	# add sliders
 	fig.subplots_adjust(.08, .30, .97, .93)
 	ax_shift = fig.add_axes([.08, .12, .89, .04])
 	ax_scale = fig.add_axes([.08, .04, .89, .04])
 	shift_slider = Slider(ax=ax_shift, label="Shift", valmin=-.5, valmax=+.5, valinit=0)
-	scale_slider = Slider(ax=ax_scale, label="Scale", valmin=0.9, valmax=1.1, valinit=1)
+	scale_slider = Slider(ax=ax_scale, label="Scale", valmin=0.8, valmax=1.2, valinit=1)
 
 	# define how to respond to the sliders
 	def get_energy_bounds_from_sliders() -> tuple[float, float]:
@@ -291,9 +298,11 @@ def align_data(distribution: SpatialEnergyDistribution, filter_stack: list[Filte
 		return energy_min, energy_max
 
 	def update_plot(*_):
-		energies = np.linspace(*get_energy_bounds_from_sliders(), distribution.num_energies)
+		energy_min, energy_max = get_energy_bounds_from_sliders()
+		energies = np.linspace(energy_min, energy_max, distribution.num_energies)
 		curve.set_xdata(energies)
 		curve.set_ydata(integrated_psl/xray_sensitivity(energies, filter_stack, detector_type))
+		ax.set_xlim(energy_min, energy_max)
 		ax.set_ylim(0, 1.1*np.max(curve.get_ydata()))
 		fig.canvas.draw_idle()
 
@@ -401,14 +410,14 @@ def main():
 	                    help="the thickness of the additional filtering (mils)")
 	parser.add_argument("--detector_type", type=str, required=False, default="BAS_MS",
 	                    help="the type of FujiFilm BAS image plate (one of 'BAS_MS', 'BAS_SR', or 'BAS_TR')")
-	for atomic_number, atomic_symbol in PERIODIC_TABLE.items():
-		parser.add_argument(f"--{atomic_symbol}", action="store_true",
-		                    help=f"whether to expect {atomic_symbol} lines")
+	for symbol in SPECTRAL_LINES.keys():
+		parser.add_argument(f"--{symbol}", action="store_true",
+		                    help=f"whether to expect {symbol} lines")
 	args = vars(parser.parse_args())
-	atomic_numbers = set()
-	for atomic_number, atomic_symbol in PERIODIC_TABLE.items():
-		if args[atomic_symbol]:
-			atomic_numbers.add(atomic_number)
+	elements = set()
+	for symbol in SPECTRAL_LINES.keys():
+		if args[symbol]:
+			elements.add(symbol)
 	filter_stack = [(args["blast_shield_thickness"]*25.4, "Be"),
 	                (args["filter_thickness"]*25.4, args["filter_material"])]
 	detector_type_parsing = re.fullmatch(
@@ -419,7 +428,7 @@ def main():
 		for filename in args["filename"].split(","):
 			print(f"Analyzing {filename}...")
 			analyze_xrs(filename, args["minimum_energy"], args["maximum_energy"],
-			            filter_stack, detector_type_parsing.group(2), atomic_numbers)
+			            filter_stack, detector_type_parsing.group(2), elements)
 		print("Done!")
 
 
