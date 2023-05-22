@@ -246,11 +246,11 @@ def ask_user_for_bounds(x: NDArray[float], y: NDArray[float]) -> tuple[float, fl
 
 	while plt.fignum_exists("selection"):
 		plt.pause(0.1)
-	if len(selected_points) != 2:
+	if len(selected_points) < 2:
 		raise ValueError("you didn't specify both limits.")
 
 	# once the user is done, arrange the results
-	return min(selected_points), max(selected_points)
+	return min(selected_points[-2:]), max(selected_points[-2:])
 
 
 def align_data(distribution: SpatialEnergyDistribution, filter_stack: list[Filter], detector_type: str,
@@ -399,9 +399,9 @@ def main():
 	parser.add_argument("filename", type=str,
 	                    help="comma-separated list of either filepaths (absolute or relative) or distinct filename substrings (if the files are in ./data)")
 	parser.add_argument("minimum_energy", type=float,
-	                    help="the nominal minimum energy that XRS sees (keV)")
+	                    help="the nominal minimum energy that XRS sees (eV)")
 	parser.add_argument("maximum_energy", type=float,
-	                    help="the nominal maximum energy that XRS sees (keV)")
+	                    help="the nominal maximum energy that XRS sees (eV)")
 	parser.add_argument("blast_shield_thickness", type=float,
 	                    help="the thickness of the Be blast shield (mils)")
 	parser.add_argument("--filter_material", type=str, required=False, default="Ta",
@@ -427,7 +427,7 @@ def main():
 	else:
 		for filename in args["filename"].split(","):
 			print(f"Analyzing {filename}...")
-			analyze_xrs(filename, args["minimum_energy"], args["maximum_energy"],
+			analyze_xrs(filename, args["minimum_energy"]/1e3, args["maximum_energy"]/1e3,
 			            filter_stack, detector_type_parsing.group(2), elements)
 		print("Done!")
 
