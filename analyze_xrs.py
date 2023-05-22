@@ -163,7 +163,7 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 
 	plt.show()
 
-	cropped_image = subtracted_image[i_min:i_max + 1, j_min:j_max + 1]
+	cropped_image = subtracted_image[i_max:i_min - 1:-1, j_min:j_max + 1]
 	return SpatialEnergyDistribution(cropped_image, energy_min, energy_max, pixel_size)
 
 
