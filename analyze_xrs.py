@@ -4,11 +4,12 @@ import argparse
 import os.path
 import re
 import sys
-from math import cos, sin, nan
+from math import cos, sin, nan, inf
 
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.backend_bases import MouseEvent, MouseButton
 from matplotlib.ticker import LinearLocator
 from matplotlib.widgets import Slider
 from numpy.typing import NDArray
@@ -40,9 +41,10 @@ def analyze_xrs(filename: str, energy_min: float, energy_max: float,
 		scan = h5py.File(filename)["PSL_per_px"]
 	except KeyError:
 		print(f"{filename!r} does not appear to be an image plate scan.")
-	distribution = rotate_image(scan, energy_min, energy_max)
-	distribution = align_data(distribution, filter_stack, detector_type, atomic_numbers)
-	plot_and_save_spectrum(distribution, filename, filter_stack, detector_type)
+	else:
+		distribution = rotate_image(scan, energy_min, energy_max)
+		distribution = align_data(distribution, filter_stack, detector_type, atomic_numbers)
+		plot_and_save_spectrum(distribution, filename, filter_stack, detector_type)
 
 
 def find_scan_file(filename: str) -> str:
@@ -104,14 +106,38 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 		ax.yaxis.set_major_locator(LinearLocator(11))
 		ax.yaxis.set_ticklabels([])
 		ax.grid(color="w", linewidth=0.4, axis="y")
+	plt.show()
 
-	# identify a background region and perform ramped background subtraction
-	min_significant_psl = np.median(rotated_image)/100
+	# identify regions off the image plate
+	min_significant_psl = np.median(rotated_image)*.01
 	on_image_plate = erode(rotated_image > min_significant_psl, 10)  # type: ignore
+
+	# ask the user to identify the bounds
 	integrated_image = np.nanmean(np.where(on_image_plate, rotated_image, nan), axis=0)
-	signal_cutoff = .9*np.nanquantile(integrated_image, .1) + .1*np.nanmax(integrated_image)
+	y_min, y_max = ask_user_for_bounds(y, integrated_image)
+	y_min, y_max = 2*y_min - y_max, 2*y_max - y_min  # expand it by a factor of 3
+	within_y_bounds = (y >= y_min) & (y <= y_max)
+	y = y[within_y_bounds]
+	on_image_plate = on_image_plate[:, within_y_bounds]
+	rotated_image = rotated_image[:, within_y_bounds]
+
+	integrated_spectrum = np.nanmean(np.where(on_image_plate, rotated_image, nan), axis=1)
+	x_min, x_max = ask_user_for_bounds(x, integrated_spectrum)
+	x_min, x_max = x_min - .500, x_max + .500  # expand it by 1 mm
+	within_x_bounds = (x >= x_min) & (x <= x_max)
+	x = x[within_x_bounds]
+	on_image_plate = on_image_plate[within_x_bounds, :]
+	rotated_image = rotated_image[within_x_bounds, :]
+
+	extent = (x[0] - pixel_size/2, x[-1] + pixel_size/2,
+	          y[0] - pixel_size/2, y[-1] + pixel_size/2)
+
+	# perform background subtraction
+	integrated_image = np.nanmean(np.where(on_image_plate, rotated_image, nan), axis=0)
+	signal_cutoff = .9*np.nanquantile(integrated_image, .67) + .1*np.nanmax(integrated_image)
 	out_of_signal_region = integrated_image < signal_cutoff
 	in_background_region = on_image_plate & out_of_signal_region
+	X, Y = np.meshgrid(x, y, indexing="ij")
 	coefs = fit_2d_polynomial(
 		X[in_background_region], Y[in_background_region], rotated_image[in_background_region])
 	subtracted_image = rotated_image - (coefs[0]*X**2 + coefs[1]*X + coefs[2]*Y + coefs[3])
@@ -128,8 +154,6 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 		          cmap=CMAP["psl"], vmin=0, vmax=vmax)
 		ax.imshow(np.where(image < 0, -image, nan).T, extent=extent, origin="lower", aspect="equal",
 		          cmap=CMAP["blood"], vmin=0, vmax=vmax/2)
-		if not np.any(np.isnan(image)):
-			ax.contour(x, y, in_background_region.T, levels=[1/2], colors=["w"], linewidths=[0.4])
 	plt.show()
 
 	# crop it to the spacial data region
@@ -139,12 +163,12 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 	j_min = np.nonzero(integrated_image[:j_peak] < cutoff)[0][-1]  # these are inclusive
 	j_max = np.nonzero(integrated_image[j_peak:] < cutoff)[0][0] + j_peak
 	j_min, j_max = j_min - (j_max - j_min)//2, j_max + (j_max - j_min)//2  # abritrarily expand the bounds a bit
-	j_min = max(0, j_min)
+	j_min = max(0, j_min)  # it’s possible for the j bounds to stay the same
 	j_max = min(j_max, integrated_image.size - 1)
 
 	# crop it to the minimum energy edge and maximum energy edge
 	integrated_distribution = subtracted_image[:, j_min:j_max + 1].sum(axis=1)
-	cutoff = np.quantile(integrated_distribution, .7)/6
+	cutoff = 0.1*np.quantile(integrated_distribution, .7)
 	i_min = np.nonzero(integrated_distribution > cutoff)[0][0]  # these are inclusive
 	i_max = np.nonzero(integrated_distribution > cutoff)[0][-1]
 
@@ -159,7 +183,7 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 	ax_upper.axvline(x[i_min] - pixel_size/2, color="k", linestyle="dashed", linewidth=1.)
 	ax_upper.axvline(x[i_max] + pixel_size/2, color="k", linestyle="dashed", linewidth=1.)
 	ax_upper.grid()
-	ax_lower.imshow(image.T, extent=extent, origin="lower", aspect="auto", cmap=CMAP["psl"], vmin=0)
+	ax_lower.imshow(subtracted_image.T, extent=extent, origin="lower", aspect="auto", cmap=CMAP["psl"], vmin=0)
 	ax_lower.axvline(x[i_min] - pixel_size/2, color="w", linestyle="dashed", linewidth=1.)
 	ax_lower.axvline(x[i_max] + pixel_size/2, color="w", linestyle="dashed", linewidth=1.)
 	ax_lower.axhline(y[j_min] - pixel_size/2, color="w", linestyle="dashed", linewidth=1.)
@@ -169,8 +193,59 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 
 	plt.show()
 
-	cropped_image = subtracted_image[i_max:i_min - 1:-1, j_min:j_max + 1]
-	return SpatialEnergyDistribution(cropped_image, energy_min, energy_max, pixel_size)
+	final_image = subtracted_image[i_max:i_min - 1:-1, j_min:j_max + 1]
+	return SpatialEnergyDistribution(final_image, energy_min, energy_max, pixel_size)
+
+
+def ask_user_for_bounds(x: NDArray[float], y: NDArray[float]) -> tuple[float, float]:
+	""" prompt the user to click on a plot to choose lower and upper limits
+	    :param x: the x coordinates to plot
+	    :param y: the y coordinates to plot
+	    :return: the minimum x and the maximum x that the user selected
+	"""
+	fig = plt.figure("selection", figsize=(8, 4))
+	plt.locator_params(steps=[1, 2, 5, 10])
+	plt.grid()
+	plt.plot(x, y)
+	plt.xlim(np.min(x, where=np.isfinite(y), initial=inf),
+	         np.max(x, where=np.isfinite(y), initial=-inf))
+	plt.title("click on the lower and upper bounds of this signal, then close this plot")
+	plt.tight_layout()
+
+	lines = [plt.plot([0, 0], [np.nanmin(y), np.nanmax(y)], "k--")[0] for _ in range(2)]
+	for line in lines:
+		line.set_visible(False)
+
+	selected_points: list[float] = []
+
+	def on_click(event: MouseEvent):
+		nonlocal selected_points
+		# whenever the user clicks...
+		if type(event) is MouseEvent and event.xdata is not None:
+			# if it's a right-click, delete a point
+			if event.button == MouseButton.RIGHT:
+				if len(selected_points) > 0:
+					selected_points.pop()
+			# otherwise, save a new point
+			else:
+				selected_points.append(event.xdata)
+			# then update the plot
+			for i in range(len(lines)):
+				if i < len(selected_points):
+					x = selected_points[-i - 1]
+					lines[i].set_xdata([x, x])
+					lines[i].set_visible(True)
+				else:
+					lines[i].set_visible(False)
+	fig.canvas.mpl_connect('button_press_event', on_click)
+
+	while plt.fignum_exists("selection"):
+		plt.pause(1)
+	if len(selected_points) != 2:
+		raise ValueError("you didn't specify both limits.")
+
+	# once the user is done, arrange the results
+	return min(selected_points), max(selected_points)
 
 
 def align_data(distribution: SpatialEnergyDistribution, filter_stack: list[Filter], detector_type: str, atomic_numbers: set[int]) -> SpatialEnergyDistribution:
