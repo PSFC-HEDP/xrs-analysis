@@ -17,6 +17,8 @@ from scipy import interpolate, optimize
 from cmap import CMAP
 from image_plate import Filter, xray_sensitivity
 
+plt.rcParams.update({"font.size": 14})
+
 PERIODIC_TABLE = {
 	1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O",
 	10: "Ne", 13: "Al", 14: "Si", 18: "Ar", 36: "Kr", 54: "Xe",
@@ -34,7 +36,10 @@ def analyze_xrs(filename: str, energy_min: float, energy_max: float,
 	    :param atomic_numbers: the set of elements whose lines we expect to see
 	"""
 	filename = find_scan_file(filename)
-	scan = h5py.File(filename)["PSL_per_px"]
+	try:
+		scan = h5py.File(filename)["PSL_per_px"]
+	except KeyError:
+		print(f"{filename!r} does not appear to be an image plate scan.")
 	distribution = rotate_image(scan, energy_min, energy_max)
 	distribution = align_data(distribution, filter_stack, detector_type, atomic_numbers)
 	plot_and_save_spectrum(distribution, filename, filter_stack, detector_type)
@@ -50,7 +55,7 @@ def find_scan_file(filename: str) -> str:
 		return filename
 	else:
 		for found_filename in os.listdir("data/"):
-			if found_filename.endswith(".h5") and filename in found_filename:
+			if found_filename.endswith(".h5") and filename in found_filename and "-analyzed" not in found_filename:
 				return f"data/{found_filename}"
 	raise FileNotFoundError(f"I could not find the file {filename!r}, nor could I find "
 	                        f"any .h5 files matching {filename!r} in data/")
