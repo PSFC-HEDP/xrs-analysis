@@ -116,37 +116,37 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 	# identify regions off the image plate
 	min_significant_psl = np.median(rotated_image)*.01
 	on_image_plate = erode(rotated_image > min_significant_psl, 10)  # type: ignore
+	rotated_image[~on_image_plate] = nan
 
 	# ask the user to identify the bounds
-	integrated_image = np.nanmean(np.where(on_image_plate, rotated_image, nan), axis=0)
+	integrated_image = np.nanmean(rotated_image, axis=0)
 	y_min, y_max = ask_user_for_bounds(y, integrated_image)
 	y_min, y_max = 2*y_min - y_max, 2*y_max - y_min  # expand it by a factor of 3
 	within_y_bounds = (y >= y_min) & (y <= y_max)
 	y = y[within_y_bounds]
-	on_image_plate = on_image_plate[:, within_y_bounds]
 	rotated_image = rotated_image[:, within_y_bounds]
 
-	integrated_spectrum = np.nanmean(np.where(on_image_plate, rotated_image, nan), axis=1)
-	x_min, x_max = ask_user_for_bounds(x, integrated_spectrum)
+	j_peak = np.argmax(np.nansum(rotated_image, axis=0))
+	central_spectrum = rotated_image[:, j_peak]
+	x_min, x_max = ask_user_for_bounds(x, central_spectrum)
 	x_min, x_max = x_min - .500, x_max + .500  # expand it by 1 mm
 	within_x_bounds = (x >= x_min) & (x <= x_max)
 	x = x[within_x_bounds]
-	on_image_plate = on_image_plate[within_x_bounds, :]
 	rotated_image = rotated_image[within_x_bounds, :]
 
 	extent = (x[0] - pixel_size/2, x[-1] + pixel_size/2,
 	          y[0] - pixel_size/2, y[-1] + pixel_size/2)
 
 	# perform background subtraction
-	integrated_image = np.nanmean(np.where(on_image_plate, rotated_image, nan), axis=0)
+	integrated_image = np.nanmean(rotated_image, axis=0)
 	signal_cutoff = .9*np.nanquantile(integrated_image, .67) + .1*np.nanmax(integrated_image)
 	out_of_signal_region = integrated_image < signal_cutoff
-	in_background_region = on_image_plate & out_of_signal_region
+	in_background_region = np.isfinite(rotated_image) & out_of_signal_region
 	X, Y = np.meshgrid(x, y, indexing="ij")
 	coefs = fit_2d_polynomial(
 		X[in_background_region], Y[in_background_region], rotated_image[in_background_region])
 	subtracted_image = rotated_image - (coefs[0]*X**2 + coefs[1]*X + coefs[2]*Y + coefs[3])
-	subtracted_image[~on_image_plate] = 0  # don’t background-subtract the off-image-plate areas
+	subtracted_image[np.isnan(subtracted_image)] = 0  # un-nanify these now that there’s a meaningful fill value
 
 	# show the result of the background subtraction
 	fig, (ax_upper, ax_middle, ax_lower) = plt.subplots(3, 1, sharex="col", figsize=(8, 5))
@@ -198,6 +198,7 @@ def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> Sp
 
 	plt.show()
 
+	i_min, i_max = i_min + int(.1/pixel_size), i_max - int(.1/pixel_size)  # contract the bounds a bit
 	final_image = subtracted_image[i_max:i_min - 1:-1, j_min:j_max + 1]
 	return SpatialEnergyDistribution(final_image, energy_min, energy_max, pixel_size)
 
@@ -284,8 +285,8 @@ def align_data(distribution: SpatialEnergyDistribution, filter_stack: list[Filte
 
 	# add sliders
 	fig.subplots_adjust(.08, .30, .97, .93)
-	ax_shift = fig.add_axes([.08, .12, .89, .04])
-	ax_scale = fig.add_axes([.08, .04, .89, .04])
+	ax_shift = fig.add_axes([.08, .12, .85, .04])
+	ax_scale = fig.add_axes([.08, .04, .85, .04])
 	shift_slider = Slider(ax=ax_shift, label="Shift", valmin=-.5, valmax=+.5, valinit=0)
 	scale_slider = Slider(ax=ax_scale, label="Scale", valmin=0.8, valmax=1.2, valinit=1)
 

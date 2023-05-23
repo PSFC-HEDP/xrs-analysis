@@ -20,6 +20,7 @@ The arguments are as follows:
    If no detector type is given, it defaults to "BAS-MS".
 8. For the purpose of aligning the spectrum, you may finally supply any number of atomic symbols as flags.
    These elements’ emission lines will appear on the screen where you adjust the spectral axis.
+   Supported elements include Ne, Al, Si, Ar, Kr, Zr, and Xe.
    For example, if you intend to align your spectrum to K-alpha emission from silicon and argon, you should add `--Si --Ar`.
 
 For example, a typical call might look something like
