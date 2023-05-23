@@ -37,4 +37,11 @@ Skipping this and trusting XRS to view the energy range you asked for will typic
 which may be acceptable depending on your use-case.
 The final spectrum will be saved as a plot and a HDF5 file next to the scan file.
 
+There’s a simple script you can run after that to infer electron temperature by fitting an exponential Bremsstrahlung to the spectrum.
+~~~bash
+python infer_temperature.py {FILENAME}
+~~~
+The `{FILENAME}` here is the same as it was before,
+but make sure you point to the analyzed HDF5 file if you’re specifying the entire filename.
+
 <sup>1</sup>Personal communication from Dan Barnak.

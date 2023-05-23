@@ -50,7 +50,7 @@ def infer_temperature(filename: str):
 
 
 def brems_spectrum(E: NDArray[float], temperature: float, yeeld: float) -> NDArray[float]:
-	""" a function to evaluate the exponential approximation of the bremsstralung spectrum """
+	""" a function to evaluate the exponential approximation of the bremsstrahlung spectrum """
 	return yeeld/temperature*np.exp(-E/temperature)
 
 
