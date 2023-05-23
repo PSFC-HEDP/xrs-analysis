@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import os.path
 import re
@@ -17,6 +15,7 @@ from scipy import interpolate, optimize
 
 from cmap import CMAP
 from image_plate import Filter, xray_sensitivity
+from util import find_scan_file, SpatialEnergyDistribution
 
 plt.rcParams.update({"font.size": 14})
 
@@ -41,7 +40,7 @@ def analyze_xrs(filename: str, energy_min: float, energy_max: float,
 	    :param detector_type: the type of FujiFilm BAS image plate (one of 'MS', 'SR', or 'TR')
 	    :param elements: the symbols of the elements whose lines we expect to see
 	"""
-	filename = find_scan_file(filename)
+	filename = find_scan_file(filename, forbidden={"-analyzed"})
 	try:
 		scan = h5py.File(filename)["PSL_per_px"]
 	except KeyError:
@@ -50,22 +49,6 @@ def analyze_xrs(filename: str, energy_min: float, energy_max: float,
 		distribution = rotate_image(scan, energy_min, energy_max)
 		distribution = align_data(distribution, filter_stack, detector_type, elements)
 		plot_and_save_spectrum(distribution, filename, filter_stack, detector_type)
-
-
-def find_scan_file(filename: str) -> str:
-	""" open the file if the filename is a complete path. otherwise, search for a file containing the given string in data/
-	    :param filename: either the path to the file (absolute or relative), or a distinct substring of a filename in ./data/
-	    :return: the opened h5py File object
-	    :raise FileNotFoundError: if neither of the attempted methods produced a readable HDF5 file
-	"""
-	if os.path.isfile(filename):
-		return filename
-	else:
-		for found_filename in os.listdir("data/"):
-			if found_filename.endswith(".h5") and filename in found_filename and "-analyzed" not in found_filename:
-				return f"data/{found_filename}"
-	raise FileNotFoundError(f"I could not find the file {filename!r}, nor could I find "
-	                        f"any .h5 files matching {filename!r} in data/")
 
 
 def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> SpatialEnergyDistribution:
@@ -349,6 +332,7 @@ def plot_and_save_spectrum(distribution: SpatialEnergyDistribution, filename: st
 	plt.figure(figsize=(8, 4), facecolor="none")
 	plt.plot(x, np.sum(spectrum, axis=0))
 	plt.xlabel("Position (μm)")
+	plt.title(os.path.basename(filename))
 	plt.xlim(x[0], x[-1])
 	plt.ylim(0, None)
 	plt.grid()
@@ -358,6 +342,7 @@ def plot_and_save_spectrum(distribution: SpatialEnergyDistribution, filename: st
 	plt.figure(figsize=(8, 4), facecolor="none")
 	plt.plot(energy, np.sum(spectrum, axis=1)*distribution.pixel_size)
 	plt.xlabel("Photon energy (keV)")
+	plt.title(os.path.basename(filename))
 	plt.xlim(energy[0], energy[-1])
 	plt.ylim(0, None)
 	plt.grid()
@@ -431,22 +416,6 @@ def main():
 			analyze_xrs(filename, args["minimum_energy"]/1e3, args["maximum_energy"]/1e3,
 			            filter_stack, detector_type_parsing.group(2), elements)
 		print("Done!")
-
-
-class SpatialEnergyDistribution:
-	def __init__(self, values: NDArray[float], energy_min: float, energy_max: float, pixel_size: float):
-		""" a function of position (in 1D) and energy, bundled with the axis information needed to interpret it.
-		    :param values: the spectral data, indexed along energy on axis 0 and space on axis 1
-		    :param energy_min: the photon energy (keV) corresponding to the leftmost value
-		    :param energy_max: the photon energy (keV) corresponding to the rightmost value
-		    :param pixel_size: the distance (μm) corresponding to a step between two adjacent rows
-		"""
-		self.values = values
-		self.num_energies = values.shape[0]
-		self.num_x = values.shape[1]
-		self.energy_min = energy_min
-		self.energy_max = energy_max
-		self.pixel_size = pixel_size
 
 
 if __name__ == "__main__":
