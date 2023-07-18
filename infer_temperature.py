@@ -30,20 +30,22 @@ def infer_temperature(filename: str):
 
 	# fit a brems spectrum
 	(temperature, yeeld), cov = optimize.curve_fit(
-		brems_spectrum, energy, spectrum, p0=[3., np.sum(spectrum*np.gradient(energy))])
-	temperature_error = 1.96*sqrt(cov[0, 0])
+		brems_spectrum,
+		energy, spectrum, sigma=spectrum*.10,
+		p0=[3., np.sum(spectrum*np.gradient(energy))])
+	temperature_error = sqrt(1.96**2*cov[0, 0] + .05**2)  # temperature error should never be less than 5%
 
 	# print and plot the results
-	print(f"Te = {temperature:.2f} ± {temperature_error:.2f} keV")
+	print(f"Te = {temperature:.3f} ± {temperature_error:.3f} keV")
 
 	plt.figure(figsize=(8, 4), facecolor="none")
 	plt.plot(energy, spectrum, "C0-")
 	plt.plot(energy, brems_spectrum(energy, temperature, yeeld), "C1--")
 	plt.grid()
+	plt.yscale("log")
 	plt.xlim(energy[0], energy[-1])
-	plt.ylim(0, None)
 	plt.xlabel("Photon energy (keV)")
-	plt.title(f"{filename} best fit; $T_\\mathrm{{e}}$ = {temperature:.2f} ± {temperature_error:.2f} keV")
+	plt.title(f"{filename} best fit; $T_\\mathrm{{e}}$ = {temperature:.3f} ± {temperature_error:.3f} keV")
 	plt.tight_layout()
 	plt.savefig(os.path.splitext(full_filename)[0] + ".png", dpi=300)
 	plt.show()
