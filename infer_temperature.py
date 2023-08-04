@@ -58,7 +58,7 @@ def brems_spectrum(E: NDArray[float], temperature: float, yeeld: float) -> NDArr
 
 def main():
 	parser = argparse.ArgumentParser(
-		prog="infer_temperature",
+		prog="python infer_temperature.py",
 		description="Load an analyzed XRS spectrum and infer a spacially-integrated electron temperature from it")
 	parser.add_argument("filename", type=str,
 	                    help="comma-separated list of either filepaths (absolute or relative) or distinct filename substrings (if the files are in ./data)")

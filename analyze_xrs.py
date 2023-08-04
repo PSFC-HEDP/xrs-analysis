@@ -379,7 +379,7 @@ def erode(array: NDArray[bool], distance: int) -> NDArray[bool]:
 
 def main():
 	parser = argparse.ArgumentParser(
-		prog="analyze_xrs",
+		prog="python analyze_xrs.py",
 		description="Load an XRS image plate scan as a HDF5 file and, with the user’s help, extract "
 		            "and plot an x-ray spectrum.")
 	parser.add_argument("filename", type=str,
