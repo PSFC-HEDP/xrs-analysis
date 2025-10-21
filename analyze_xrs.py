@@ -31,7 +31,7 @@ SPECTRAL_LINES = {
 
 
 def analyze_xrs(filename: str, energy_min: float, energy_max: float,
-                filter_stack: list[Filter], detector_type: str, elements: set[str]):
+                filter_stack: list[Filter], detector_type: str, elements: set[str], flip: bool):
 	""" load an XRS image plate scan as a HDF5 file and, with the user’s help, extract and plot an x-ray spectrum
 	    :param filename: either the path to the file (absolute or relative), or a distinct substring of a filename in ./data/
 	    :param energy_min: the nominal minimum energy that XRS sees (keV)
@@ -39,6 +39,7 @@ def analyze_xrs(filename: str, energy_min: float, energy_max: float,
 	    :param filter_stack: the list of layers of material between the source and the image plate
 	    :param detector_type: the type of FujiFilm BAS image plate (one of 'MS', 'SR', or 'TR')
 	    :param elements: the symbols of the elements whose lines we expect to see
+	    :param flip: whether to rotate the raw data 180 degrees
 	"""
 	filename = find_scan_file(filename, forbidden={"-analyzed"})
 	try:
@@ -46,23 +47,26 @@ def analyze_xrs(filename: str, energy_min: float, energy_max: float,
 	except KeyError:
 		print(f"{filename!r} does not appear to be an image plate scan.")
 	else:
-		distribution = rotate_image(scan, energy_min, energy_max)
+		distribution = rotate_image(scan, energy_min, energy_max, flip)
 		distribution = align_data(distribution, filter_stack, detector_type, elements)
 		plot_and_save_spectrum(distribution, filename, filter_stack, detector_type)
 
 
-def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float) -> SpatialEnergyDistribution:
+def rotate_image(scan: h5py.Dataset, energy_min: float, energy_max: float, flip: bool) -> SpatialEnergyDistribution:
 	""" take a raw scan file, infer how much it has been rotated and shifted, and correct it to
 	    obtain an allined spacio-energo-image
 	    :param scan: the scan data taken directly from the h5py File
 	    :param energy_min: the nominal minimum energy that XRS sees (keV)
 	    :param energy_max: the nominal maximum energy that XRS sees (keV)
+	    :param flip: whether to rotate the raw data 180 degrees
 	    :return: the PSL data resloved in space and energy
 	"""
 	# load in the image
 	pixel_size = scan.attrs["pixelSizeX"]/1e4
 	assert scan.attrs["pixelSizeX"] == scan.attrs["pixelSizeY"], "why aren’t the pixels square?"
 	raw_image = np.transpose(scan[:, :])  # convert from (y,x) indexing to (i,j) indexing
+	if flip:
+		raw_image = np.flip(raw_image)
 
 	# convert it to an interpolator
 	x = pixel_size*np.arange(-raw_image.shape[0]/2 + 1/2, raw_image.shape[0]/2)
@@ -396,6 +400,8 @@ def main():
 	                    help="the thickness of the additional filtering (mils)")
 	parser.add_argument("--detector_type", type=str, required=False, default="BAS_MS",
 	                    help="the type of FujiFilm BAS image plate (one of 'BAS_MS', 'BAS_SR', or 'BAS_TR')")
+	parser.add_argument("--flip", action="store_true",
+	                    help="include this flag if your data seems to be inverted in energy; it'll rotate the data 180°.")
 	for symbol in SPECTRAL_LINES.keys():
 		parser.add_argument(f"--{symbol}", action="store_true",
 		                    help=f"whether to expect {symbol} lines")
@@ -414,7 +420,7 @@ def main():
 		for filename in args["filename"].split(","):
 			print(f"Analyzing {filename}...")
 			analyze_xrs(filename, args["minimum_energy"]/1e3, args["maximum_energy"]/1e3,
-			            filter_stack, detector_type_parsing.group(2), elements)
+			            filter_stack, detector_type_parsing.group(2), elements, args["flip"])
 		print("Done!")
 
 
